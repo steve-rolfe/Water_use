@@ -1,0 +1,180 @@
+---
+title: "Moving average"
+author: "Steve Rolfe"
+date: "26 October 2015"
+output: html_document
+
+Standard code to clear the system and install required libraries
+```{r}
+rm(list=ls())
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+library(zoo)
+```
+
+Set up standard files names and the subset to plot
+```{r}
+setwd("C:/Users/Steve Rolfe/Google Drive/Phenomics/Water_Use")
+
+input_file="./data/BR7_watering_data posix.csv"
+plant_codes="./data/BR7_plant_codes.csv"
+
+output_file="./output/BR7_water_out.csv"
+
+
+#subset of data to plot using grep format
+sset<-"BR7-0[1-5]1[1-3][1-4]"
+```
+
+We use a rolling average to smooth out the noise - this sets the window size for this average
+To calculate the maximum value we use a larger window
+Finally we set the tolerance of how close a value has to be to this maximum to be the maximum
+```{R}
+#rolling window size - for the rolling average of water data
+wsz<-3
+#maximum window size - for the number of points from which to calculate the maximum
+msz<-6
+#how close to the maximum value does a value have to be to be counted as a maximum
+csz<-0.9
+```
+
+
+Set up standard headers for the files - these need to be edited to be consistent
+The BR codes are suppled by IBERS but we should include the ASSYT codes where possible
+Standard headers should be
+BR_code,date_time, measurements (with informative names)
+Custom code will be needed to translate the BR_codes into useful information
+
+Read in the data and check that the required headers are there
+```{r}
+#read in the data
+wdata<-read.csv(input_file,header=TRUE,stringsAsFactors = FALSE,row.names = NULL)
+if(is.object(wdata)==FALSE) {stop(c("Can't open file:",input_file))}
+
+#check that there the required headings are there and throw an error if not
+if(is.na(match("BR_code",colnames(wdata)))){stop("BR_code missing from input file header")}
+if(is.na(match("date_time",colnames(wdata)))){stop("date_time missing from input file header")}
+head(wdata)
+
+#this file contains info about the plants used
+plant_codes<-read.csv(plant_codes,header = TRUE,stringsAsFactors = FALSE)
+if(is.object(plant_codes)==FALSE) {stop(c("Can't open file:",plant_codes))}
+```
+
+We  deal with any specific coding here about names of plants, spores etc.
+Use the file plant_codes to keep the information organised
+```{r}
+#dpi offset from first data point
+#it's good to express everything as dpi but 1st data point might not be dpi
+#set the date of infection
+dpi_datetime<-"2015-7-6 00:00:00"
+
+#now set the factors manually
+wdata$BR_code<-as.factor(wdata$BR_code)
+
+#and set the plants,spores,etc
+#the plant code is the sixth character in the BR7 string
+wdata$plant<-as.factor(substr(wdata$BR_code,6,6))
+#the spore concentration code is the 8th character
+wdata$spore<-as.factor(substr(wdata$BR_code,8,8))
+#the repeat is the 9th
+wdata$rep<-as.factor(substr(wdata$BR_code,9,9))
+head(wdata)
+
+#now merge the plant names with the data frame
+wdata<-merge(wdata,plant_codes,by.x="plant",by.y="plant_code")
+head(wdata)
+
+#now do some standard time processing
+#use difftime to get the days since inoculation
+wdata$dpi<-as.numeric(difftime(wdata$date_time,dpi_datetime,units="days"))
+#for a continuous x scale don't convert dpi into factors
+head(wdata)
+```
+
+Now do the calculations on the selected subset of data
+```{R}
+subdata<-subset(wdata,grepl(sset,wdata$BR_code))
+
+#use droplevels to get rid of 0 length levels from the subset - causes problems otherwise
+subdata<-droplevels(subdata)
+head(subdata)
+
+#sort the data so that the rolling means and cumulative values are correct
+subdata<-subdata[with(subdata,order(BR_code,dpi)),]
+#get the rolling average by group (window = wsz)
+subdata$ravg<-ave(subdata$diff_wt,subdata$BR_code,FUN=function(x) rollmean(x,k=wsz,fill = NA,na.pad=T))
+#try the cumultative sum as well
+subdata$cumsum<-ave(subdata$diff_wt,subdata$BR_code,FUN=function(x) cumsum(x))
+```
+
+Now do some plots
+```{R}
+#plot the rolling average and raw data - the facet wrap makes the plots for each plant separate
+p1<-ggplot(data=subdata,aes(x=dpi,y=diff_wt,color=spore,group=BR_code))+geom_point()
+p1<-p1+geom_line(data=subdata,aes(x=dpi,y=ravg,colour=spore,group=BR_code))
+p1<-p1+scale_y_continuous(name="Weight g")
+p1<-p1+facet_wrap(~plant_name)
+p1
+
+#just rolling average data
+p2<-ggplot(data=subdata,aes(x=dpi,y=ravg,color=spore,group=BR_code))+geom_line()
+p2<-p2+scale_y_continuous(name="Weight g")
+p2<-p2+facet_wrap(~plant_name)
+p2
+
+#plot cumulative sums
+p3<-ggplot(data=subdata,aes(x=dpi,y=cumsum,color=spore,group=BR_code))+geom_point()
+p3<-p3+geom_line(data=subdata,aes(x=dpi,y=cumsum,colour=spore,group=BR_code))
+p3<-p3+scale_y_continuous(name="Weight g")
+p3<-p3+facet_wrap(~plant_name)
+p3
+```
+
+Now get some parameters from the data
+```{R}
+#to find the peak values, then look in the rolling average data and get the nth maxima
+#this creates a new sorted file (by group) with the NAs at the end
+sort_subdata<-subdata[order(subdata$BR_code,subdata$ravg,na.last=TRUE,decreasing=TRUE),]
+
+#create a vector to hold data by groups
+grp<-group_by(sort_subdata,BR_code)
+#get the mean of the msz th largest values
+d<-summarise(grp,mean_ravg=mean(ravg[1:msz],na.rm=TRUE))
+d
+#merge
+subdata<-merge(subdata,d,by="BR_code")
+
+#now create a new column in subdata based on whether the ravg is less than the mean
+subdata$lt_max<-subdata$ravg<(csz*d$mean_ravg[subdata$BR_code])
+head(subdata)
+
+#now get the first value which is less than csz*mean
+pt1<-as.data.frame(aggregate(lt_max~BR_code,subdata,FUN=which.min))
+#merge back into subdata
+subdata<-merge(subdata,pt1,by="BR_code")
+#the column names get odd so rename
+subdata<-rename(subdata,lt_max_bool = lt_max.x)
+subdata<-rename(subdata,lt_max_day = lt_max.y)
+```
+
+```{R}
+#plot the time to maximum  as a boxplot
+p1<-ggplot(subdata,aes(x=spore,lt_max_day))
+p1<-p1+geom_boxplot(aes(fill=spore),outlier.colour="red",outlier.size=3)
+p1<-p1+scale_y_continuous(name="Days to max weight")
+p1<-p1+facet_wrap(~plant_name,ncol=5)
+p1
+
+#plot the maximum weight attained
+p2<-ggplot(subdata,aes(x=spore,mean_ravg))
+p2<-p2+geom_boxplot(aes(fill=spore),outlier.colour="red",outlier.size=3)
+p2<-p2+scale_y_continuous(name="Max weight (g)")
+p2<-p2+facet_wrap(~plant_name,ncol=5)
+p2
+
+write.csv(subdata,file=output_file)
+
+```
+
